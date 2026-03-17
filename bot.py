@@ -2,16 +2,18 @@ import logging
 import random
 import sqlite3
 import os
-from datetime import datetime, time
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
+import pytz
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "APNA_TOKEN_YAHAN")
 UPI_ID = os.environ.get("UPI_ID", "8948979748@ybl")
 DB_PATH = "/app/data/streakforge.db"
+IST = pytz.timezone("Asia/Kolkata")
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -49,6 +51,12 @@ def init_db():
         user_id INTEGER,
         clan_name TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS waiting_pool (
+        user_id INTEGER PRIMARY KEY,
+        joined_at TEXT,
+        category TEXT,
+        minutes INTEGER
+    )''')
     conn.commit()
     conn.close()
 
@@ -82,7 +90,7 @@ def new_user(user_id, name, username):
         "user_id": user_id, "name": name, "lang": None,
         "goal": None, "streak": 0, "best_streak": 0, "old_streak": 0,
         "shields_normal": 0, "shields_legendary": 0,
-        "trial_start": datetime.now().isoformat(),
+        "trial_start": datetime.datetime.now().isoformat(),
         "paid": 0, "state": "choose_lang", "partner_id": None,
         "recovery_mode": 0, "recovery_day": 0, "clan": None,
         "last_checkin": None, "checkin_count": 0,
@@ -99,16 +107,38 @@ def init_clans():
     conn.commit()
     conn.close()
 
-def get_all_users():
+def get_all_active_users():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM users")
+    c.execute("SELECT * FROM users WHERE goal IS NOT NULL")
     rows = c.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-waiting_pool = {}
+def add_to_waiting_pool(user_id, category, minutes):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO waiting_pool VALUES (?,?,?,?)",
+              (user_id, datetime.datetime.now().isoformat(), category, minutes))
+    conn.commit()
+    conn.close()
+
+def remove_from_waiting_pool(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM waiting_pool WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_waiting_pool():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM waiting_pool")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 FORGE_RESPONSES = {
     "motivation": [
@@ -131,7 +161,7 @@ MESSAGES = {
         "ai_onboard": "🤖 *Smart Setup*\n\nI'll ask 3 questions to create your perfect goal.\n\n*Question 1:* What's your main focus?\n• 💪 Fitness\n• 📚 Study/Career\n• 💰 Business/Money\n• 🎯 Self-Discipline",
         "voice_intro": "🎙 *Voice Mode Activated*\n\nSend *voice notes* to your partner.\n\nVoice builds 10x stronger connection!\n\n*Send your first voice note now!*",
         "streak_casino": "🎰 *Streak Casino*\n\nCheck-in karke rewards jeeto!\n\nReady?",
-        "partner_match": "🎉 *Partner Matched!*\n\n*AI Compatibility Score: {score}%*\n\nYou both: {common_traits}\n\n*First task:* Send voice note!\n\n*Their streak depends on YOU.*",
+        "partner_match": "🎉 *Partner Matched!*\n\n*AI Compatibility Score: {score}%*\n\nYou both: {common_traits}\n\n*Partner name: {partner_name}*\n\n*First task:* Send voice note!\n\n*Their streak depends on YOU.*",
         "break_shield": "🛡 *Shield Activated!*\n\nYour *{shield_type}* saved your streak!\n\nRemaining: {count}\n\n*Tomorrow pakka check-in.*",
         "recovery_mode": "🔄 *Recovery Mode*\n\n*3-Day Challenge:*\nDay 1: 10 min task\nDay 2: 20 min task\nDay 3: Full check-in\n\n*Complete = Streak RESTORED + Shield*",
         "clan_invite": "🏰 *Join a Clan*\n\nSolo = 3x harder\nClan = 10x accountability\n\n*Active Clans:*\n{clan_list}\n\n/join_clan ClanName",
@@ -139,24 +169,26 @@ MESSAGES = {
         "forge_welcome": "🤖 *Forge AI Coach*\n\nYour 24/7 accountability partner.\n\nChoose:",
         "morning_reminder": "☀️ *Good Morning {name}!*\n\n🎯 Goal: _{goal}_\n🔥 Streak: {streak} days\n\nAaj ka check-in karo: /checkin\n\n*Partner wait kar raha hai!* 💪",
         "evening_reminder": "🌙 *{name}, aaj check-in kiya?*\n\n🔥 Streak: {streak} days\n⏰ Sirf 2 ghante bache!\n\n👉 /checkin\n\n*Streak mat todna!* 🛡",
-        "night_reminder": "🌃 *Last chance {name}!*\n\n🚨 Aaj check-in nahi kiya!\n🔥 Streak: {streak} days at risk!\n\n👉 /checkin\n\n*Kal se nahi — ABHI karo!*",
-        "partner_not_checked": "⚠️ *{name} ne aaj check-in nahi kiya!*\n\nUnka streak: {streak} days at risk 😟\n\nEk message bhejo — motivate karo! 💪",
+        "night_reminder": "🌃 *Last chance {name}!*\n\n🚨 Aaj check-in nahi kiya!\n🔥 Streak: {streak} days at risk!\n\n👉 /checkin\n\n*Abhi karo!*",
+        "partner_not_checked": "⚠️ *{name} ne aaj check-in nahi kiya!*\n\nUnka streak: {streak} days at risk 😟\n\nEk reaction bhejo — motivate karo! 👇",
+        "react_prompt": "💬 *Partner ko react karo:*",
     },
     "hi": {
         "welcome": "🔥 *StreakForge में स्वागत है*\n\nआप कमजोर नहीं हो।\nकोई देख नहीं रहा इसलिए फेल होते हो।\n\n*अपना रास्ता चुनें:*",
         "ai_onboard": "🤖 *स्मार्ट सेटअप*\n\n3 सवाल — परफेक्ट गोल बनेगा।\n\n*सवाल 1:* मुख्य फोकस?\n• 💪 फिटनेस\n• 📚 पढ़ाई/करियर\n• 💰 बिजनेस\n• 🎯 सेल्फ-डिसिप्लिन",
         "voice_intro": "🎙 *वॉइस मोड ऑन*\n\nपार्टनर को *वॉइस नोट्स* भेजो।\n\nआवाज़ = 10x कनेक्शन!\n\n*अभी पहला वॉइस नोट भेजो!*",
         "streak_casino": "🎰 *स्ट्रीक कैसीनो*\n\nचेक-इन करके रिवॉर्ड्स जीतो!\n\nतैयार?",
-        "partner_match": "🎉 *पार्टनर मिल गया!*\n\n*AI स्कोर: {score}%*\n\nआप दोनों: {common_traits}\n\n*पहला टास्क:* वॉइस नोट भेजो!\n\n*उनका स्ट्रीक आप पर है।*",
+        "partner_match": "🎉 *पार्टनर मिल गया!*\n\n*AI स्कोर: {score}%*\n\nआप दोनों: {common_traits}\n\n*पार्टनर का नाम: {partner_name}*\n\n*पहला टास्क:* वॉइस नोट भेजो!\n\n*उनका स्ट्रीक आप पर है।*",
         "break_shield": "🛡 *शील्ड एक्टिव!*\n\n*{shield_type}* ने स्ट्रीक बचाई!\n\nबचे: {count}\n\n*कल पक्का चेक-इन।*",
         "recovery_mode": "🔄 *रिकवरी मोड*\n\n*3-दिन चैलेंज:*\nदिन 1: 10 मिनट\nदिन 2: 20 मिनट\nदिन 3: फुल चेक-इन\n\n*पूरा = स्ट्रीक वापस + शील्ड*",
         "clan_invite": "🏰 *क्लान जॉइन करो*\n\nअकेले = 3x मुश्किल\nक्लान = 10x ताकत\n\n*एक्टिव क्लान:*\n{clan_list}\n\n/join_clan CllanNaam",
         "paywall_day5": "⏰ *पार्टनर को जरूरत है*\n\n{partner_name} ने आज चेक-इन किया।\n\n*आप नहीं आए = उनका स्ट्रीक टूटेगा।*\n\n₹79 = 1 कॉफी = 30 दिन बदलाव\n\n*पेमेंट: {upi}*\n/paid bhejo",
         "forge_welcome": "🤖 *फोर्ज AI कोच*\n\n24/7 अकाउंटेबिलिटी पार्टनर।\n\nक्या चाहिए:",
-        "morning_reminder": "☀️ *सुप्रभात {name}!*\n\n🎯 गोल: _{goal}_\n🔥 स्ट्रीक: {streak} दिन\n\nआज का चेक-इन करो: /checkin\n\n*पार्टनर इंतज़ार कर रहा है!* 💪",
+        "morning_reminder": "☀️ *सुप्रभात {name}!*\n\n🎯 गोल: _{goal}_\n🔥 स्ट्रीक: {streak} दिन\n\nआज का चेक-इन: /checkin\n\n*पार्टनर इंतज़ार कर रहा है!* 💪",
         "evening_reminder": "🌙 *{name}, आज चेक-इन किया?*\n\n🔥 स्ट्रीक: {streak} दिन\n⏰ सिर्फ 2 घंटे बचे!\n\n👉 /checkin\n\n*स्ट्रीक मत तोड़ना!* 🛡",
-        "night_reminder": "🌃 *आखिरी मौका {name}!*\n\n🚨 आज चेक-इन नहीं किया!\n🔥 स्ट्रीक: {streak} दिन खतरे में!\n\n👉 /checkin\n\n*कल से नहीं — अभी करो!*",
-        "partner_not_checked": "⚠️ *{name} ने आज चेक-इन नहीं किया!*\n\nउनकी स्ट्रीक: {streak} दिन खतरे में 😟\n\nएक मैसेज भेजो — मोटिवेट करो! 💪",
+        "night_reminder": "🌃 *आखिरी मौका {name}!*\n\n🚨 आज चेक-इन नहीं किया!\n🔥 स्ट्रीक: {streak} दिन खतरे में!\n\n👉 /checkin\n\n*अभी करो!*",
+        "partner_not_checked": "⚠️ *{name} ने आज चेक-इन नहीं किया!*\n\nउनकी स्ट्रीक: {streak} दिन खतरे में 😟\n\nएक रिएक्शन भेजो — मोटिवेट करो! 👇",
+        "react_prompt": "💬 *पार्टनर को रिएक्ट करो:*",
     }
 }
 
@@ -166,16 +198,13 @@ def get_text(user_id, key, **kwargs):
     text = MESSAGES[lang].get(key, MESSAGES["en"][key])
     return text.format(**kwargs) if kwargs else text
 
-# ============ REMINDER FUNCTIONS ============
+# ============ REMINDER JOB FUNCTIONS ============
 
-async def send_morning_reminder(app):
-    """Subah 8 baje — motivation + goal reminder"""
-    users = get_all_users()
+async def send_morning_job(context: ContextTypes.DEFAULT_TYPE):
+    users = get_all_active_users()
     for u in users:
-        if not u.get("goal"):
-            continue
         try:
-            await app.bot.send_message(
+            await context.bot.send_message(
                 chat_id=u["user_id"],
                 text=get_text(u["user_id"], "morning_reminder",
                              name=u["name"],
@@ -186,20 +215,17 @@ async def send_morning_reminder(app):
         except Exception:
             pass
 
-async def send_evening_reminder(app):
-    """Sham 7 baje — checkin reminder"""
-    users = get_all_users()
-    today = datetime.now(IST).date()
+async def send_evening_job(context: ContextTypes.DEFAULT_TYPE):
+    users = get_all_active_users()
+    today = datetime.datetime.now(IST).date()
     for u in users:
-        if not u.get("goal"):
-            continue
         last = u.get("last_checkin")
         if last:
-            last_date = datetime.fromisoformat(last).date()
+            last_date = datetime.datetime.fromisoformat(last).date()
             if last_date == today:
-                continue  # Already checked in
+                continue
         try:
-            await app.bot.send_message(
+            await context.bot.send_message(
                 chat_id=u["user_id"],
                 text=get_text(u["user_id"], "evening_reminder",
                              name=u["name"],
@@ -209,22 +235,19 @@ async def send_evening_reminder(app):
         except Exception:
             pass
 
-async def send_night_reminder(app):
-    """Raat 10 baje — last chance + partner alert"""
-    users = get_all_users()
-    today = datetime.now(IST).date()
+async def send_night_job(context: ContextTypes.DEFAULT_TYPE):
+    users = get_all_active_users()
+    today = datetime.datetime.now(IST).date()
     for u in users:
-        if not u.get("goal"):
-            continue
         last = u.get("last_checkin")
         already_done = False
         if last:
-            last_date = datetime.fromisoformat(last).date()
+            last_date = datetime.datetime.fromisoformat(last).date()
             if last_date == today:
                 already_done = True
         if not already_done:
             try:
-                await app.bot.send_message(
+                await context.bot.send_message(
                     chat_id=u["user_id"],
                     text=get_text(u["user_id"], "night_reminder",
                                  name=u["name"],
@@ -233,17 +256,23 @@ async def send_night_reminder(app):
                 )
             except Exception:
                 pass
-            # Partner ko bhi alert karo
             partner_id = u.get("partner_id")
             if partner_id:
                 partner = get_user(partner_id)
                 if partner:
                     try:
-                        await app.bot.send_message(
+                        react_keyboard = [[
+                            InlineKeyboardButton("🔥", callback_data=f"react_fire_{u['user_id']}"),
+                            InlineKeyboardButton("💪", callback_data=f"react_strong_{u['user_id']}"),
+                            InlineKeyboardButton("❤️", callback_data=f"react_love_{u['user_id']}"),
+                            InlineKeyboardButton("👑", callback_data=f"react_crown_{u['user_id']}"),
+                        ]]
+                        await context.bot.send_message(
                             chat_id=partner_id,
                             text=get_text(partner_id, "partner_not_checked",
                                          name=u["name"],
                                          streak=u["streak"]),
+                            reply_markup=InlineKeyboardMarkup(react_keyboard),
                             parse_mode="Markdown"
                         )
                     except Exception:
@@ -325,14 +354,10 @@ async def ai_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif step == 3:
         tl = text.lower().replace(" ","")
-        if "21" in tl:
-            days = 21
-        elif "90" in tl:
-            days = 90
-        elif any(x in tl for x in ["1year","year","365"]):
-            days = 365
-        else:
-            days = 30
+        if "21" in tl: days = 21
+        elif "90" in tl: days = 90
+        elif any(x in tl for x in ["1year","year","365"]): days = 365
+        else: days = 30
         u["onboard_days"] = days
         goals = {
             "fitness": f"Daily {u['onboard_minutes']} min workout for {days} days",
@@ -373,39 +398,41 @@ async def accept_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def try_match(user_id, context):
     u = get_user(user_id)
     category = u.get("onboard_category")
+    minutes = u.get("onboard_minutes", 30)
+    pool = get_waiting_pool()
     best_match = None
     best_score = 0
-    for pid in list(waiting_pool.keys()):
-        if pid == user_id:
-            continue
-        partner = get_user(pid)
-        if not partner:
+    for p in pool:
+        if p["user_id"] == user_id:
             continue
         score = 50
-        if partner.get("onboard_category") == category:
+        if p.get("category") == category:
             score += 30
-        if abs((partner.get("onboard_minutes") or 30) - (u.get("onboard_minutes") or 30)) <= 15:
+        if abs((p.get("minutes") or 30) - minutes) <= 15:
             score += 20
         if score > best_score:
             best_score = score
-            best_match = pid
+            best_match = p
     if best_match:
-        partner_id = best_match
-        del waiting_pool[partner_id]
+        partner_id = best_match["user_id"]
+        remove_from_waiting_pool(partner_id)
         u["partner_id"] = partner_id
         save_user(u)
         partner = get_user(partner_id)
         partner["partner_id"] = user_id
         save_user(partner)
         traits = ["same focus area", "similar time commitment", "serious about growth"]
-        for uid in [user_id, partner_id]:
+        for uid, pname in [(user_id, partner["name"]), (partner_id, u["name"])]:
             await context.bot.send_message(
                 chat_id=uid,
-                text=get_text(uid, "partner_match", score=best_score, common_traits=", ".join(traits)),
+                text=get_text(uid, "partner_match",
+                             score=best_score,
+                             common_traits=", ".join(traits),
+                             partner_name=pname),
                 parse_mode="Markdown"
             )
     else:
-        waiting_pool[user_id] = datetime.now()
+        add_to_waiting_pool(user_id, category, minutes)
         await context.bot.send_message(
             chat_id=user_id,
             text="⏳ *Finding your match...*\n\nAverage wait: 2-4 hours\n\nMeanwhile: /forge",
@@ -418,8 +445,8 @@ async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         await start(update, context)
         return
-    trial_start = datetime.fromisoformat(u["trial_start"])
-    days_used = (datetime.now() - trial_start).days
+    trial_start = datetime.datetime.fromisoformat(u["trial_start"])
+    days_used = (datetime.datetime.now() - trial_start).days
     if days_used >= 5 and not u["paid"]:
         partner_id = u.get("partner_id")
         partner = get_user(partner_id) if partner_id else None
@@ -435,8 +462,8 @@ async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     last = u["last_checkin"]
     if last:
-        last_date = datetime.fromisoformat(last).date()
-        today = datetime.now().date()
+        last_date = datetime.datetime.fromisoformat(last).date()
+        today = datetime.datetime.now().date()
         if (today - last_date).days > 1:
             await handle_streak_break(update, context)
             return
@@ -475,7 +502,7 @@ async def casino_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u["streak"] += 1
     if u["streak"] > u["best_streak"]:
         u["best_streak"] = u["streak"]
-    u["last_checkin"] = datetime.now().isoformat()
+    u["last_checkin"] = datetime.datetime.now().isoformat()
     u["checkin_count"] += 1
     save_user(u)
     await query.edit_message_text(
@@ -487,9 +514,16 @@ async def casino_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if partner_id:
         partner = get_user(partner_id)
         if partner:
+            react_keyboard = [[
+                InlineKeyboardButton("🔥", callback_data=f"react_fire_{user_id}"),
+                InlineKeyboardButton("💪", callback_data=f"react_strong_{user_id}"),
+                InlineKeyboardButton("❤️", callback_data=f"react_love_{user_id}"),
+                InlineKeyboardButton("👑", callback_data=f"react_crown_{user_id}"),
+            ]]
             await context.bot.send_message(
                 chat_id=partner_id,
-                text=f"💪 *{u['name']}* rolled *{reward_name}*!\nStreak: {u['streak']} 🔥\n\nTera turn: /checkin",
+                text=f"💪 *{u['name']}* rolled *{reward_name}*!\nStreak: {u['streak']} 🔥\n\nReact karo:",
+                reply_markup=InlineKeyboardMarkup(react_keyboard),
                 parse_mode="Markdown"
             )
 
@@ -503,7 +537,7 @@ async def normal_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u["streak"] += 1
     if u["streak"] > u["best_streak"]:
         u["best_streak"] = u["streak"]
-    u["last_checkin"] = datetime.now().isoformat()
+    u["last_checkin"] = datetime.datetime.now().isoformat()
     u["checkin_count"] += 1
     save_user(u)
     await query.edit_message_text(
@@ -514,11 +548,49 @@ async def normal_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if partner_id:
         partner = get_user(partner_id)
         if partner:
+            react_keyboard = [[
+                InlineKeyboardButton("🔥", callback_data=f"react_fire_{user_id}"),
+                InlineKeyboardButton("💪", callback_data=f"react_strong_{user_id}"),
+                InlineKeyboardButton("❤️", callback_data=f"react_love_{user_id}"),
+                InlineKeyboardButton("👑", callback_data=f"react_crown_{user_id}"),
+            ]]
             await context.bot.send_message(
                 chat_id=partner_id,
-                text=f"✅ *{u['name']}* checked in!\nStreak: {u['streak']} 🔥\n\nTera turn: /checkin",
+                text=f"✅ *{u['name']}* checked in!\nStreak: {u['streak']} 🔥\n\nReact karo:",
+                reply_markup=InlineKeyboardMarkup(react_keyboard),
                 parse_mode="Markdown"
             )
+
+async def react_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    reactor_id = query.from_user.id
+    await query.answer()
+    parts = query.data.split("_")
+    react_type = parts[1]
+    target_id = int(parts[2])
+    reactor = get_user(reactor_id)
+    if not reactor:
+        return
+    react_messages = {
+        "fire": f"🔥 *{reactor['name']}* sent you FIRE!\n\nWo teri streak dekh ke inspired hai! Keep going! 🔥",
+        "strong": f"💪 *{reactor['name']}* thinks you're STRONG!\n\nTera partner proud hai tujhpe! 💪",
+        "love": f"❤️ *{reactor['name']}* sent love!\n\nSaath mein ye journey amazing hai! ❤️",
+        "crown": f"👑 *{reactor['name']}* crowned you LEGEND!\n\nTu champion ban raha hai! 👑"
+    }
+    msg = react_messages.get(react_type, f"🎉 *{reactor['name']}* reacted!")
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=msg,
+            parse_mode="Markdown"
+        )
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=reactor_id,
+            text=f"✅ Reaction bhej diya! {['🔥','💪','❤️','👑'][['fire','strong','love','crown'].index(react_type)]}",
+        )
+    except Exception:
+        pass
 
 async def handle_streak_break(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -635,14 +707,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=user_id,
                 message_id=update.message.message_id
             )
+            react_keyboard = [[
+                InlineKeyboardButton("🔥", callback_data=f"react_fire_{user_id}"),
+                InlineKeyboardButton("💪", callback_data=f"react_strong_{user_id}"),
+                InlineKeyboardButton("❤️", callback_data=f"react_love_{user_id}"),
+                InlineKeyboardButton("👑", callback_data=f"react_crown_{user_id}"),
+            ]]
             await context.bot.send_message(
                 chat_id=partner_id,
-                text=f"🎙 *{name}* sent a voice note!\n\n/checkin kiya? 💪",
+                text=f"🎙 *{name}* sent a voice note!\n\nReact karo:",
+                reply_markup=InlineKeyboardMarkup(react_keyboard),
                 parse_mode="Markdown"
             )
             await update.message.reply_text("✅ Voice note partner ko mil gaya! 🎙")
-        else:
-            await update.message.reply_text("⏳ Partner nahi mila abhi.")
     else:
         await update.message.reply_text("⏳ Partner nahi mila abhi. /forge se coach se baat karo.")
 
@@ -786,7 +863,7 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Pehle /start karo")
         return
     u["paid"] = 1
-    u["trial_start"] = datetime.now().isoformat()
+    u["trial_start"] = datetime.datetime.now().isoformat()
     u["shields_normal"] += 3
     save_user(u)
     await update.message.reply_text(
@@ -808,7 +885,11 @@ def main():
     init_clans()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Scheduler setup
+    # Daily reminders using PTB job_queue
+    job_queue = app.job_queue
+    job_queue.run_daily(send_morning_job, time=datetime.time(8, 0, tzinfo=IST))
+    job_queue.run_daily(send_evening_job, time=datetime.time(19, 0, tzinfo=IST))
+    job_queue.run_daily(send_night_job, time=datetime.time(22, 0, tzinfo=IST))
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("forge", forge))
@@ -826,9 +907,10 @@ def main():
     app.add_handler(CallbackQueryHandler(recovery_callback, pattern="^recovery_"))
     app.add_handler(CallbackQueryHandler(forge_callback, pattern="^forge_"))
     app.add_handler(CallbackQueryHandler(battle_callback, pattern="^(accept_battle_|decline_battle)"))
+    app.add_handler(CallbackQueryHandler(react_callback, pattern="^react_"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_onboarding))
-    print("🤖 StreakForge Bot running with reminders...")
+    print("🤖 StreakForge Bot running with reminders + reactions!")
     app.run_polling()
 
 if __name__ == "__main__":
