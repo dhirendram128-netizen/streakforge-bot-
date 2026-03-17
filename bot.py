@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 import pytz
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "APNA_TOKEN_YAHAN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8612749378:AAGW31sA00x1YmB3A4IvpkPfFb5RobIC-Uk")
 UPI_ID = os.environ.get("UPI_ID", "8948979748@ybl")
 DB_PATH = "/app/data/streakforge.db"
 IST = pytz.timezone("Asia/Kolkata")
@@ -915,3 +915,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
