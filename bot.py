@@ -221,8 +221,8 @@ async def ai_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     elif step == 2:
-        t = text.lower().replace("min","").replace("+","").replace("hour","").strip()
-        time_map = {"15": 15, "30": 30, "1": 60, "2": 120}
+        t = text.lower().replace("min","").replace("+","").replace("hours","").replace("hour","").replace(" ","").strip()
+        time_map = {"15": 15, "30": 30, "1": 60, "2": 120, "60": 60, "1hour": 60, "2hours": 120}
         minutes = time_map.get(t, 30)
         u["onboard_minutes"] = minutes
         u["onboard_step"] = 3
@@ -232,7 +232,7 @@ async def ai_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     elif step == 3:
-        days = 21 if "21" in text else 30 if "30" in text else 90 if "90" in text else 365
+        days = 21 if "21" in text else 30 if "30" in text else 90 if "90" in text else 365 if any(x in text.lower() for x in ["1year","1 year","year","365"]) else 30
         u["onboard_days"] = days
         goals = {
             "fitness": f"Daily {u['onboard_minutes']} min workout for {days} days",
