@@ -8,14 +8,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-import pytz
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "APNA_TOKEN_YAHAN")
 UPI_ID = os.environ.get("UPI_ID", "8948979748@ybl")
 DB_PATH = "/app/data/streakforge.db"
-IST = pytz.timezone("Asia/Kolkata")
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -813,11 +809,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Scheduler setup
-    scheduler = AsyncIOScheduler(timezone=IST)
-    scheduler.add_job(send_morning_reminder, CronTrigger(hour=8, minute=0, timezone=IST), args=[app])
-    scheduler.add_job(send_evening_reminder, CronTrigger(hour=19, minute=0, timezone=IST), args=[app])
-    scheduler.add_job(send_night_reminder, CronTrigger(hour=22, minute=0, timezone=IST), args=[app])
-    scheduler.start()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("forge", forge))
